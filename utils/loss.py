@@ -9,26 +9,28 @@ import torch
 import torch.nn as nn
 
 
-def CoxLoss(survtime, censor, hazard_pred, device):
+def CoxLoss(survtime, censor, hazard_pred, device=None):
     """
-    Cox proportional hazards partial likelihood loss (fully vectorized on GPU).
+    Cox proportional hazards negative partial log-likelihood.
 
-    Credit: Travers Ching (cox-nnet)
+    Vectorised and numerically stable (log-sum-exp over each risk set).
+    Risk set of sample i = all samples j with survtime[j] >= survtime[i].
+
+    Args:
+        survtime: (N,) observed times
+        censor: (N,) event indicator (1 = event observed)
+        hazard_pred: (N,) or (N, 1) predicted log-risk
     """
     survtime = survtime.view(-1)
     censor = censor.view(-1)
     theta = hazard_pred.view(-1)
 
-    # Vectorized risk set matrix: R_mat[i, j] = 1 if survtime[j] >= survtime[i]
-    R_mat = (survtime.unsqueeze(0) >= survtime.unsqueeze(1)).float()
-
-    exp_theta = torch.exp(theta)
-    risk_sum = torch.sum(exp_theta.unsqueeze(0) * R_mat, dim=1)
-    # Numerical stability
-    risk_sum = torch.clamp(risk_sum, min=1e-7)
-
-    loss_cox = -torch.mean((theta - torch.log(risk_sum)) * censor)
-    return loss_cox
+    in_risk_set = survtime.unsqueeze(0) >= survtime.unsqueeze(1)
+    theta_mat = theta.unsqueeze(0).expand(len(theta), -1)
+    log_risk = torch.logsumexp(
+        theta_mat.masked_fill(~in_risk_set, float('-inf')), dim=1
+    )
+    return -torch.mean((theta - log_risk) * censor)
 
 
 class NLLSurvLoss(nn.Module):

@@ -41,33 +41,46 @@ def dfs_unfreeze(model):
         dfs_unfreeze(child)
 
 
+def _unimodal_subnets(model):
+    """Sub-networks of a fusion model that can be pre-trained and frozen."""
+    m = model.module if hasattr(model, 'module') else model
+    return {name: getattr(m, name) for name in ('net_omic', 'net_grph')
+            if isinstance(getattr(m, name, None), torch.nn.Module)}
+
+
+def freeze_unimodal(model, names=('net_omic', 'net_grph')):
+    """Freeze the given unimodal sub-networks of a fusion model."""
+    frozen = []
+    for name, net in _unimodal_subnets(model).items():
+        if name in names:
+            for p in net.parameters():
+                p.requires_grad = False
+            frozen.append(name)
+    return frozen
+
+
 def unfreeze_unimodal(opt, model, epoch):
     """
-    Unfreeze pre-trained unimodal sub-networks at a specified epoch.
-    Following the paper: unfreeze at epoch 5 during fusion training.
-    """
-    m = model.module if hasattr(model, 'module') else model
+    Unfreeze pre-trained unimodal sub-networks once `opt.unfreeze_epoch`
+    is reached (paper: epoch 5). `unfreeze_epoch <= 0` keeps them frozen.
 
-    if epoch == 5:
-        if opt.mode in ('graphomic', 'pathgraphomic'):
-            if hasattr(m, 'omic_net'):
-                dfs_unfreeze(m.omic_net)
-                print("Unfreezing Omic Network")
-            if hasattr(m, 'grph_net'):
-                dfs_unfreeze(m.grph_net)
-                print("Unfreezing Graph Network")
-        elif opt.mode == 'pathomic':
-            if hasattr(m, 'omic_net'):
-                dfs_unfreeze(m.omic_net)
-                print("Unfreezing Omic Network")
-        elif opt.mode == 'omicomic':
-            if hasattr(m, 'omic_net'):
-                dfs_unfreeze(m.omic_net)
-                print("Unfreezing Omic Network")
-        elif opt.mode == 'graphgraph':
-            if hasattr(m, 'grph_net'):
-                dfs_unfreeze(m.grph_net)
-                print("Unfreezing Graph Network")
+    Constants such as `output_range` stay frozen.
+    """
+    target = getattr(opt, 'unfreeze_epoch', 5)
+    if target <= 0 or epoch != target:
+        return []
+    unfrozen = []
+    for name, net in _unimodal_subnets(model).items():
+        changed = False
+        for pname, p in net.named_parameters():
+            if pname in ('output_range', 'output_shift'):
+                continue
+            if not p.requires_grad:
+                p.requires_grad = True
+                changed = True
+        if changed:
+            unfrozen.append(name)
+    return unfrozen
 
 
 # ── Collate ────────────────────────────────────────────────────────────
@@ -239,12 +252,12 @@ def getCleanAllDataset(dataroot='./data/TCGA_GBMLGG/',
             ]
 
     # Impute missing genomic data with median
+    if 'Molecular subtype' in all_dataset.columns:
+        all_dataset['Molecular subtype'] = all_dataset[
+            'Molecular subtype'
+        ].fillna('Missing')
     for col in all_dataset.columns:
         if col not in metadata:
-            if 'Molecular subtype' in all_dataset.columns:
-                all_dataset['Molecular subtype'] = all_dataset[
-                    'Molecular subtype'
-                ].fillna('Missing')
             all_dataset[col] = all_dataset[col].fillna(
                 all_dataset[col].median() if all_dataset[col].dtype != object 
                 else 'Missing'

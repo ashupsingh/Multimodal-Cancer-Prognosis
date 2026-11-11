@@ -94,18 +94,9 @@ class PathomicNet(nn.Module):
 
         # Modality Sub-networks
         if getattr(opt, 'use_vgg_features', 0):
-            # Pre-extracted 512*7*7 VGG features
-            self.net_path = nn.Sequential(
-                nn.Linear(512 * 7 * 7, 1024),
-                nn.ReLU(True),
-                nn.Dropout(0.25),
-                nn.Linear(1024, 1024),
-                nn.ReLU(True),
-                nn.Dropout(0.25),
-                nn.Linear(1024, opt.path_dim),
-                nn.ReLU(True),
-                nn.Dropout(0.05)
-            )
+            # Pre-extracted path_dim-d CNN embeddings are fed straight
+            # into the fusion module; no path network is needed.
+            self.net_path = None
         else:
             self.net_path = get_vgg(
                 arch='vgg19_bn', cfg='E', act=None,
@@ -144,10 +135,12 @@ class PathomicNet(nn.Module):
             x_p = kwargs['x_path']
             if x_p.dim() > 2:
                 x_p = x_p.view(x_p.size(0), -1)
-            if x_p.shape[-1] == self.opt.path_dim:
-                feat_p = x_p
-            else:
-                feat_p = self.net_path(x_p)
+            if x_p.shape[-1] != self.opt.path_dim:
+                raise ValueError(
+                    f"use_vgg_features=1 expects {self.opt.path_dim}-d path "
+                    f"embeddings, got {x_p.shape[-1]}-d"
+                )
+            feat_p = x_p
         else:
             feat_p, _ = self.net_path(**kwargs)
 
@@ -238,17 +231,9 @@ class PathgraphomicNet(nn.Module):
 
         # 1. Path Network (Histology CNN)
         if getattr(opt, 'use_vgg_features', 0):
-            self.net_path = nn.Sequential(
-                nn.Linear(512 * 7 * 7, 1024),
-                nn.ReLU(True),
-                nn.Dropout(0.25),
-                nn.Linear(1024, 1024),
-                nn.ReLU(True),
-                nn.Dropout(0.25),
-                nn.Linear(1024, opt.path_dim),
-                nn.ReLU(True),
-                nn.Dropout(0.05)
-            )
+            # Pre-extracted path_dim-d CNN embeddings are fed straight
+            # into the fusion module; no path network is needed.
+            self.net_path = None
         else:
             self.net_path = get_vgg(
                 arch='vgg19_bn', cfg='E', act=None,
@@ -297,10 +282,12 @@ class PathgraphomicNet(nn.Module):
             x_p = kwargs['x_path']
             if x_p.dim() > 2:
                 x_p = x_p.view(x_p.size(0), -1)
-            if x_p.shape[-1] == self.opt.path_dim:
-                feat_p = x_p
-            else:
-                feat_p = self.net_path(x_p)
+            if x_p.shape[-1] != self.opt.path_dim:
+                raise ValueError(
+                    f"use_vgg_features=1 expects {self.opt.path_dim}-d path "
+                    f"embeddings, got {x_p.shape[-1]}-d"
+                )
+            feat_p = x_p
         else:
             feat_p, _ = self.net_path(**kwargs)
 
@@ -418,6 +405,37 @@ class OmicomicNet(nn.Module):
         return fused, hazard
 
 
+# ── Histology head on pre-extracted CNN embeddings ────────────────────
+
+class PathFeatNet(nn.Module):
+    """
+    Histology model for pre-extracted CNN embeddings (use_vgg_features=1).
+
+    The split files store the `path_dim`-d embedding produced by the per-fold
+    VGG19-BN histology CNN. This model is that CNN's final prediction layer,
+    re-fit on the stored embeddings.
+    """
+
+    def __init__(self, path_dim=32, act=None, label_dim=1):
+        super(PathFeatNet, self).__init__()
+        self.linear = nn.Linear(path_dim, label_dim)
+        self.act = act
+        self.output_range = Parameter(torch.FloatTensor([6]), requires_grad=False)
+        self.output_shift = Parameter(torch.FloatTensor([-3]), requires_grad=False)
+        init_max_weights(self)
+
+    def forward(self, **kwargs):
+        features = kwargs['x_path']
+        if features.dim() > 2:
+            features = features.view(features.size(0), -1)
+        out = self.linear(features)
+        if self.act is not None:
+            out = self.act(out)
+            if isinstance(self.act, nn.Sigmoid):
+                out = out * self.output_range + self.output_shift
+        return features, out
+
+
 # ── Model Factory ─────────────────────────────────────────────────────
 
 def define_net(opt, custom_act=None):
@@ -435,7 +453,10 @@ def define_net(opt, custom_act=None):
     """
     act = custom_act if custom_act is not None else define_act_layer(opt.act_type)
 
-    if opt.mode == 'path':
+    if opt.mode == 'path' and getattr(opt, 'use_vgg_features', 0):
+        net = PathFeatNet(path_dim=opt.path_dim, act=act,
+                          label_dim=opt.label_dim)
+    elif opt.mode == 'path':
         net = get_vgg(
             arch='vgg19_bn', cfg='E', act=act,
             batch_norm=True, path_dim=opt.path_dim,
@@ -487,7 +508,9 @@ def define_net(opt, custom_act=None):
 
 def define_optimizer(opt, model):
     """Factory to create optimizer for the given model and config."""
-    params = [p for p in model.parameters() if p.requires_grad]
+    # All parameters are registered: frozen ones receive no gradient and are
+    # skipped by the optimizer until `unfreeze_unimodal` re-enables them.
+    params = list(model.parameters())
 
     if opt.optimizer_type == 'adam':
         optimizer = torch.optim.Adam(
@@ -543,37 +566,54 @@ def define_scheduler(opt, optimizer):
 
 # ── Regularization Factory ────────────────────────────────────────────
 
+def _l1(params):
+    total = None
+    for p in params:
+        if p.requires_grad:
+            term = p.abs().sum()
+            total = term if total is None else total + term
+    return total
+
+
 def define_reg(opt, model):
     """
-    Compute L1 regularization loss for the model based on opt.reg_type.
-    
+    L1 regularisation loss selected by opt.reg_type.
+
     reg_type options:
-        'none': No L1 regularization
-        'omic': Regularize omic network weights
-        'path': Regularize path network classifier weights
-        'mm': Regularize fusion module weights
-        'all': Regularize all model parameters
+        'none': no regularisation
+        'omic': omic network (the whole model in unimodal omic mode)
+        'path': path network classifier head
+        'mm':   fusion module and prediction head
+        'all':  every trainable parameter
     """
+    device = next(model.parameters()).device
+    zero = torch.tensor(0.0, device=device)
     if opt.reg_type == 'none' or opt.lambda_reg == 0:
-        return torch.tensor(0.0, device=next(model.parameters()).device)
+        return zero
 
-    loss_reg = torch.tensor(0.0, device=next(model.parameters()).device)
-
-    if opt.reg_type == 'omic' and hasattr(model, 'net_omic'):
-        for name, param in model.net_omic.named_parameters():
-            if 'weight' in name and param.requires_grad:
-                loss_reg = loss_reg + torch.norm(param, 1)
-    elif opt.reg_type == 'path' and hasattr(model, 'net_path'):
-        for name, param in model.net_path.named_parameters():
-            if 'classifier' in name and 'weight' in name and param.requires_grad:
-                loss_reg = loss_reg + torch.norm(param, 1)
-    elif opt.reg_type == 'mm' and hasattr(model, 'fusion'):
-        for name, param in model.fusion.named_parameters():
-            if 'weight' in name and param.requires_grad:
-                loss_reg = loss_reg + torch.norm(param, 1)
+    m = model.module if hasattr(model, 'module') else model
+    params = []
+    if opt.reg_type == 'omic':
+        target = getattr(m, 'net_omic', None)
+        if target is None and isinstance(m, MaxNet):
+            target = m
+        if target is not None:
+            params = list(target.parameters())
+    elif opt.reg_type == 'path':
+        target = getattr(m, 'net_path', None)
+        if target is None and isinstance(m, (PathNet, PathFeatNet)):
+            target = m
+        if target is not None:
+            params = [p for n, p in target.named_parameters()
+                      if 'classifier' in n or 'linear' in n]
+    elif opt.reg_type == 'mm':
+        for name in ('fusion', 'classifier'):
+            if hasattr(m, name):
+                params += list(getattr(m, name).parameters())
     elif opt.reg_type == 'all':
-        for param in model.parameters():
-            if param.requires_grad:
-                loss_reg = loss_reg + torch.norm(param, 1)
+        params = list(m.parameters())
 
+    loss_reg = _l1(params)
+    if loss_reg is None:
+        return zero
     return opt.lambda_reg * loss_reg

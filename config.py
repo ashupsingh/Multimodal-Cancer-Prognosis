@@ -10,8 +10,13 @@ import os
 import torch
 
 
-def parse_args():
-    """Parse command line arguments for training and evaluation."""
+def parse_args(argv=None):
+    """Parse command line arguments for training and evaluation.
+
+    Args:
+        argv: optional list of arguments (defaults to sys.argv). Unknown
+              arguments raise an error instead of being silently ignored.
+    """
     parser = argparse.ArgumentParser(
         description='Pathomic Fusion: Multimodal Cancer Prognosis'
     )
@@ -23,8 +28,9 @@ def parse_args():
     parser.add_argument('--checkpoints_dir', type=str,
                         default='./checkpoints/TCGA_GBMLGG',
                         help='Directory to save model checkpoints')
-    parser.add_argument('--exp_name', type=str, default='surv_15_rnaseq',
-                        help='Experiment name (used for checkpoint subdirectory)')
+    parser.add_argument('--exp_name', type=str, default=None,
+                        help='Experiment name (checkpoint subdirectory). '
+                             'Default: surv_15_rnaseq (surv) or grad_15 (grad)')
     parser.add_argument('--results_dir', type=str, default='./results',
                         help='Directory to save evaluation results')
 
@@ -49,15 +55,16 @@ def parse_args():
     parser.add_argument('--task', type=str, default='surv',
                         choices=['surv', 'grad'],
                         help='Task: surv=survival prediction, grad=grade classification')
-    parser.add_argument('--act_type', type=str, default='Sigmoid',
+    parser.add_argument('--act_type', type=str, default=None,
                         choices=['Sigmoid', 'Tanh', 'ReLU', 'LSM', 'none'],
-                        help='Output activation function')
-    parser.add_argument('--label_dim', type=int, default=1,
+                        help='Output activation (default: Sigmoid for surv, LSM for grad)')
+    parser.add_argument('--label_dim', type=int, default=None,
                         help='Output dimension (1 for survival, 3 for grade)')
 
     # ── Dimensions ────────────────────────────────────────────────────────
     parser.add_argument('--input_size_omic', type=int, default=80,
-                        help='Genomic input feature dimension')
+                        help='Genomic input feature dimension '
+                             '(set from the split file at train time)')
     parser.add_argument('--input_size_path', type=int, default=512,
                         help='Histopathology image crop size')
     parser.add_argument('--path_dim', type=int, default=32,
@@ -111,7 +118,7 @@ def parse_args():
     parser.add_argument('--epoch_count', type=int, default=1,
                         help='Starting epoch count')
     parser.add_argument('--batch_size', type=int, default=32,
-                        help='Training batch size')
+                        help='Training batch size (0 = full batch)')
     parser.add_argument('--num_splits', type=int, default=15,
                         help='Number of cross-validation folds')
 
@@ -159,14 +166,74 @@ def parse_args():
     parser.add_argument('--finetune', type=int, default=1,
                         help='Enable fine-tuning of pretrained layers')
 
-    opt = parser.parse_known_args()[0]
+    # ── Cross-validation protocol ─────────────────────────────────────────
+    parser.add_argument('--folds', type=str, default='all',
+                        help="Folds to run: 'all' or comma list, e.g. 1,2,3")
+    parser.add_argument('--seed', type=int, default=2019,
+                        help='Base random seed')
+    parser.add_argument('--n_seeds', type=int, default=1,
+                        help='Models trained per fold with different seeds; '
+                             'their predictions are averaged (ensemble)')
+    parser.add_argument('--cv_workers', type=int, default=1,
+                        help='Folds trained in parallel processes (use with '
+                             '--gpu_ids -1 for the small feature-based models)')
+    parser.add_argument('--split_path', type=str, default='',
+                        help='Explicit split .pkl (default: auto-resolved)')
+    parser.add_argument('--standardize_path', type=int, default=1,
+                        help='Standardise pre-extracted histology embeddings '
+                             'with training-fold statistics')
+    parser.add_argument('--dedup_patients', type=int, default=1,
+                        help='Omic-only training: keep one row per patient '
+                             '(rows of a patient are identical in this mode)')
+
+    # ── Unimodal pre-training for fusion networks ─────────────────────────
+    parser.add_argument('--load_unimodal', type=int, default=1,
+                        help='Fusion modes: load the per-fold pre-trained '
+                             'omic network and freeze it')
+    parser.add_argument('--unimodal_name', type=str, default='omic',
+                        help='model_name of the pre-trained omic run')
+    parser.add_argument('--unimodal_grph_name', type=str, default='graph',
+                        help='model_name of the pre-trained graph run')
+    parser.add_argument('--cache_graphs', type=int, default=1,
+                        help='Keep loaded cell graphs in memory')
+    parser.add_argument('--num_workers', type=int, default=0,
+                        help='DataLoader workers (graph / raw-image modes)')
+    parser.add_argument('--unfreeze_epoch', type=int, default=5,
+                        help='Epoch at which frozen unimodal nets are '
+                             'unfrozen (0 = never unfreeze)')
+
+    # ── Split generation (datasets/make_splits.py) ────────────────────────
+    parser.add_argument('--roi_dir', type=str, default='all_st_patches_512',
+                        help='ROI image sub-directory under dataroot')
+    parser.add_argument('--graph_feat_type', type=str, default='cpc',
+                        help='Graph feature type suffix of the graph dir')
+    parser.add_argument('--ignore_missing_moltype', type=int, default=1)
+    parser.add_argument('--ignore_missing_histype', type=int, default=0)
+    parser.add_argument('--lr_decay_iters', type=int, default=10,
+                        help='Step size for --lr_policy step')
+
+    opt = parser.parse_args(argv)
+    opt = finalize_options(opt)
+    return opt
+
+
+def finalize_options(opt):
+    """Fill task-dependent defaults and parse GPU ids."""
+    if opt.exp_name is None:
+        opt.exp_name = 'grad_15' if opt.task == 'grad' else 'surv_15_rnaseq'
+    if opt.act_type is None:
+        opt.act_type = 'LSM' if opt.task == 'grad' else 'Sigmoid'
+    if opt.label_dim is None:
+        opt.label_dim = 3 if opt.task == 'grad' else 1
     opt = _parse_gpu_ids(opt)
     return opt
 
 
 def _parse_gpu_ids(opt):
     """Parse GPU IDs from comma-separated string."""
-    str_ids = opt.gpu_ids.split(',')
+    if isinstance(opt.gpu_ids, (list, tuple)):
+        return opt
+    str_ids = str(opt.gpu_ids).split(',')
     opt.gpu_ids = []
     for str_id in str_ids:
         gpu_id = int(str_id)

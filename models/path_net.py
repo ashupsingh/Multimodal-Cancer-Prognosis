@@ -97,9 +97,17 @@ class PathNet(nn.Module):
         # Freeze pretrained VGG features
         dfs_freeze(self.features)
 
+    def train(self, mode=True):
+        """Keep the frozen VGG backbone (and its BatchNorm statistics) in
+        eval mode so the pre-trained features do not drift during training."""
+        super(PathNet, self).train(mode)
+        self.features.eval()
+        return self
+
     def forward(self, **kwargs):
         x = kwargs['x_path']
-        x = self.features(x)
+        with torch.no_grad():
+            x = self.features(x)
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         features = self.classifier(x)

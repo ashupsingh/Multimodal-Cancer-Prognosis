@@ -192,18 +192,18 @@ class GenomicExplainer:
 
         colors = ['#e74c3c' if a > 0 else '#3498db' for a in top_df['Attribution']]
 
-        plt.figure(figsize=(10, 8), dpi=300)
+        plt.figure(figsize=(10, 8), dpi=200)
         plt.barh(top_df['Feature'], top_df['Attribution'], color=colors, edgecolor='black', alpha=0.85)
         plt.axvline(0, color='gray', linestyle='--', linewidth=0.8)
-        plt.xlabel('Attribution Score (Integrated Gradients)', fontsize=12, fontweight='bold')
+        plt.xlabel('Signed importance (Integrated Gradients)', fontsize=12, fontweight='bold')
         plt.ylabel('Gene / Genomic Feature', fontsize=12, fontweight='bold')
         plt.title(title, fontsize=14, fontweight='bold', pad=15)
         plt.grid(axis='x', linestyle=':', alpha=0.6)
 
         # Legend
         import matplotlib.patches as mpatches
-        risk_patch = mpatches.Patch(color='#e74c3c', label='Increased Risk (Poor Prognosis)')
-        prot_patch = mpatches.Patch(color='#3498db', label='Protective (Favorable Prognosis)')
+        risk_patch = mpatches.Patch(color='#e74c3c', label='Higher value → higher predicted risk')
+        prot_patch = mpatches.Patch(color='#3498db', label='Higher value → lower predicted risk')
         plt.legend(handles=[risk_patch, prot_patch], loc='lower right', frameon=True)
 
         plt.tight_layout()
@@ -216,55 +216,152 @@ class GenomicExplainer:
             plt.show()
 
 
-# ── Demo / Self-Test Runner ───────────────────────────────────────────
+# ── Explain the trained models ────────────────────────────────────────
 
-def run_explainability_demo(output_dir='./results/explainability'):
-    """Generate demonstration heatmaps and feature attributions."""
+def explain_genomic_model(exp_name='surv_15_rnaseq', model_name='omic',
+                          task='surv', output_dir='./results/explainability',
+                          checkpoints_dir='./checkpoints/TCGA_GBMLGG'):
+    """
+    Integrated Gradients for the trained genomic SNN.
+
+    For every cross-validation fold, the trained network of that fold is
+    explained on its own *test* patients (one genomic vector per patient).
+    The baseline is the all-zero vector, i.e. the training-set mean of the
+    standardised features. Attributions are averaged over patients and folds.
+
+    Returns:
+        DataFrame with the mean signed attribution and mean absolute
+        attribution of every genomic feature, or None when no trained
+        checkpoint is available.
+    """
+    import glob
+    import pickle
+    from config import parse_args
+    from experiments import experiment_argv
+    from models.networks import define_net
+    from train import load_splits
+    from datasets.data_loader import first_row_per_patient, valid_indices
+
+    if not HAS_CAPTUM:
+        print("captum is not installed; skipping genomic attribution.")
+        return None
+
+    opt = parse_args(experiment_argv(task, 'omic') + ['--gpu_ids', '-1'])
+    opt.model_name = model_name
+    split_file, cv_splits = load_splits(opt)
+    with open(split_file, 'rb') as f:
+        data_pd = pickle.load(f)['data_pd']
+    meta = ['Histomolecular subtype', 'Histology', 'Grade', 'Molecular subtype',
+            'TCGA ID', 'censored', 'Survival months']
+    feature_names = [c for c in data_pd.columns if c not in meta]
+    feature_names = feature_names[:opt.input_size_omic]
+
+    ckpt_dir = os.path.join(checkpoints_dir, exp_name, model_name)
+    absolute, slope_num, slope_den, n_patients, n_models = [], 0.0, 0.0, 0, 0
+    for k in sorted(cv_splits):
+        ckpts = sorted(glob.glob(os.path.join(ckpt_dir, f"{model_name}_{k}_s*.pt")))
+        if not ckpts:
+            continue
+        test = cv_splits[k]['test']
+        idx = first_row_per_patient(test['x_patname'], valid_indices(test, task))
+        x = torch.tensor(np.asarray(test['x_omic'])[idx], dtype=torch.float32)
+        for ckpt in ckpts:
+            model = define_net(opt)
+            model.load_state_dict(torch.load(
+                ckpt, map_location='cpu', weights_only=False)['model_state_dict'])
+            explainer = GenomicExplainer(model)
+            # survival: single risk output; grade: attribute the Grade IV class
+            target = 0 if task == 'surv' else 2
+            attr = explainer.ig.attribute(
+                x, baselines=torch.zeros_like(x), target=target, n_steps=50
+            ).detach().numpy()
+            absolute.append(np.abs(attr).mean(axis=0))
+            # direction of effect: slope of attribution against feature value
+            slope_num = slope_num + (attr * x.numpy()).sum(axis=0)
+            slope_den = slope_den + (x.numpy() ** 2).sum(axis=0)
+            n_models += 1
+        n_patients += len(idx)
+
+    if not absolute:
+        print(f"No trained checkpoints found in {ckpt_dir}; nothing to explain.")
+        return None
+
+    importance = np.mean(absolute, axis=0)
+    direction = np.sign(slope_num / np.maximum(slope_den, 1e-12))
+    df = pd.DataFrame({
+        'Feature': feature_names,
+        # signed importance: + when a higher feature value raises the
+        # predicted risk, - when it lowers it
+        'Attribution': importance * direction,
+        'AbsImportance': importance,
+    }).sort_values('AbsImportance', ascending=False)
+
     os.makedirs(output_dir, exist_ok=True)
-    print("\n" + "=" * 60)
-    print(" Running Explainability Suite (Grad-CAM & Integrated Gradients)")
-    print("=" * 60)
+    df.to_csv(os.path.join(output_dir, 'genomic_attributions.csv'), index=False)
+    print(f"Integrated Gradients: {n_models} trained models, "
+          f"{n_patients} test-patient evaluations, {len(df)} features.")
+    GenomicExplainer(model).plot_top_features(
+        df, top_k=20,
+        save_path=os.path.join(output_dir, 'genomic_top_attributions.png'),
+        title='Top genomic features — trained SNN, test patients of all folds\n'
+              '(Integrated Gradients: mean |attribution| to predicted risk)')
+    return df
 
-    # 1. Genomic Attribution Demo
-    from models.omic_net import MaxNet
-    net_omic = MaxNet(input_dim=320, omic_dim=32, act=None, label_dim=1, init_max=True)
-    explainer = GenomicExplainer(net_omic)
 
-    # Load actual gene names from dataset if available
-    split_p = './data/TCGA_GBMLGG/splits/gbmlgg15cv_all_st_1_0_0_rnaseq.pkl'
-    gene_names = None
-    if os.path.exists(split_p):
-        import pickle
-        with open(split_p, 'rb') as f:
-            data = pickle.load(f)
-        meta = ['Histomolecular subtype', 'Histology', 'Grade', 'Molecular subtype', 'TCGA ID', 'censored', 'Survival months']
-        gene_names = [c for c in data['data_pd'].columns if c not in meta][:320]
+def explain_histology_model(output_dir='./results/explainability',
+                            dataroot='./data/TCGA_GBMLGG',
+                            exp_name='surv_15_rnaseq', model_name='path',
+                            checkpoints_dir='./checkpoints/TCGA_GBMLGG'):
+    """
+    Grad-CAM for a trained histology CNN on a real ROI.
 
-    sample_omic = torch.randn(1, 320)
-    df_attr = explainer.attribute(sample_omic, feature_names=gene_names)
-    csv_out = os.path.join(output_dir, 'genomic_attributions.csv')
-    df_attr.to_csv(csv_out, index=False)
-    print(f"Computed Integrated Gradients for {len(df_attr)} genomic features.")
+    Requires both the ROI images and a histology CNN trained end-to-end on
+    them (`--mode path --use_vgg_features 0`). Returns None otherwise: a
+    heat-map from an untrained network or a synthetic image carries no
+    information, so none is produced.
+    """
+    import glob
+    roi_dir = os.path.join(dataroot, 'all_st_patches_512')
+    images = sorted(glob.glob(os.path.join(roi_dir, '*.png')))
+    ckpts = sorted(glob.glob(os.path.join(
+        checkpoints_dir, exp_name, model_name, f"{model_name}_1_s*.pt")))
+    state = (torch.load(ckpts[0], map_location='cpu', weights_only=False)
+             if ckpts else None)
+    trained_cnn = state is not None and any(
+        key.startswith('features.') for key in state['model_state_dict'])
+    if not images or not trained_cnn:
+        print("Grad-CAM skipped: it needs the ROI images under "
+              f"{roi_dir} and a histology CNN trained end-to-end on them.")
+        return None
 
-    plot_out = os.path.join(output_dir, 'genomic_top_attributions.png')
-    explainer.plot_top_features(df_attr, top_k=20, save_path=plot_out)
-
-    # 2. Grad-CAM Demo on synthetic or real ROI
+    from torchvision import transforms
     from models.path_net import get_vgg
-    net_path = get_vgg(arch='vgg19_bn', cfg='E', act=None, batch_norm=True, path_dim=32, label_dim=1, pretrained=True)
-    grad_cam = GradCAM(net_path)
+    net = get_vgg(arch='vgg19_bn', cfg='E', act=None, batch_norm=True,
+                  path_dim=32, label_dim=1, pretrained=False)
+    net.load_state_dict(state['model_state_dict'], strict=False)
+    img = Image.open(images[0]).convert('RGB')
+    tensor = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ])(img).unsqueeze(0).requires_grad_(True)
+    grad_cam = GradCAM(net)
+    overlay = grad_cam.overlay_on_image(img, grad_cam.generate_heatmap(tensor))
+    out = os.path.join(output_dir, 'histopathology_gradcam_overlay.png')
+    os.makedirs(output_dir, exist_ok=True)
+    overlay.save(out)
+    print(f"Saved Grad-CAM overlay for {os.path.basename(images[0])} to {out}")
+    return out
 
-    dummy_img = Image.fromarray((np.random.rand(512, 512, 3) * 255).astype(np.uint8))
-    tensor_input = torch.randn(1, 3, 512, 512, requires_grad=True)
 
-    heatmap = grad_cam.generate_heatmap(tensor_input)
-    overlay = grad_cam.overlay_on_image(dummy_img, heatmap)
-
-    cam_out = os.path.join(output_dir, 'histopathology_gradcam_overlay.png')
-    overlay.save(cam_out)
-    print(f"Saved Grad-CAM histopathology attention map to {cam_out}")
+def run_explainability(output_dir='./results/explainability'):
+    """Explain the trained models (genomic attributions, Grad-CAM)."""
+    print("\n" + "=" * 60)
+    print(" Explainability (Integrated Gradients & Grad-CAM)")
+    print("=" * 60)
+    explain_genomic_model(output_dir=output_dir)
+    explain_histology_model(output_dir=output_dir)
     print("=" * 60 + "\n")
 
 
 if __name__ == '__main__':
-    run_explainability_demo()
+    run_explainability()

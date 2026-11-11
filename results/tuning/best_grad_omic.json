@@ -1,0 +1,16 @@
+{
+  "task": "grad",
+  "mode": "omic",
+  "metric": "auc_patient",
+  "val_score": 0.8509120562853992,
+  "val_se": 0.005971307116853323,
+  "val_frac": 0.25,
+  "n_folds": 15,
+  "overrides": {
+    "lr": 0.002,
+    "niter_decay": 30,
+    "dropout_rate": 0.25,
+    "lambda_reg": 0.0003,
+    "batch_size": 64
+  }
+}

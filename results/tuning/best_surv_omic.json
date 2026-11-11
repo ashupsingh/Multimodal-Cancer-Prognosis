@@ -1,0 +1,16 @@
+{
+  "task": "surv",
+  "mode": "omic",
+  "metric": "cindex_patient",
+  "val_score": 0.8276377261794546,
+  "val_se": 0.008452552256965578,
+  "val_frac": 0.25,
+  "n_folds": 15,
+  "overrides": {
+    "lr": 0.0005,
+    "niter_decay": 60,
+    "dropout_rate": 0.25,
+    "lambda_reg": 0.0003,
+    "batch_size": 32
+  }
+}

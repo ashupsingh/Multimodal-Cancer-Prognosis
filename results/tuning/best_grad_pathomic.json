@@ -1,0 +1,14 @@
+{
+  "task": "grad",
+  "mode": "pathomic",
+  "metric": "auc_patient",
+  "val_score": 0.9454833779748392,
+  "val_se": 0.0038395914354654673,
+  "val_frac": 0.25,
+  "n_folds": 15,
+  "overrides": {
+    "lr": 0.002,
+    "unfreeze_epoch": 0,
+    "omic_gate": 0
+  }
+}

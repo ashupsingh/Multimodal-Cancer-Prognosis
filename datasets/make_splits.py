@@ -9,6 +9,7 @@ Reference: Chen et al. (2022) - Pathomic Fusion, IEEE TMI
 """
 
 import os
+import copy
 import pickle
 import numpy as np
 import pandas as pd
@@ -31,8 +32,27 @@ def get_vgg_features(model, device, img_path):
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
     x_path = torch.unsqueeze(normalize(x_path), dim=0)
-    features, hazard = model(x_path=x_path.to(device))
-    return features.cpu().detach().numpy()
+    with torch.no_grad():
+        features, hazard = model(x_path=x_path.to(device))
+    return features.cpu().numpy()
+
+
+def load_fold_path_model(opt, k, device):
+    """Histology CNN trained end-to-end on the training patients of fold k."""
+    ckpt = os.path.join(opt.checkpoints_dir, opt.exp_name, 'path',
+                        f"path_{k}_s0.pt")
+    if not os.path.exists(ckpt):
+        raise FileNotFoundError(
+            f"{ckpt} not found. Train the histology CNN on raw ROIs first "
+            "(python train.py --mode path --model_name path "
+            "--use_vgg_features 0) before extracting embeddings."
+        )
+    path_opt = copy.copy(opt)
+    path_opt.mode, path_opt.use_vgg_features = 'path', 0
+    model = define_net(path_opt)
+    model.load_state_dict(torch.load(
+        ckpt, map_location=device, weights_only=False)['model_state_dict'])
+    return model.eval()
 
 
 def getAlignedMultimodalData(opt, model, device, all_dataset, metadata, pat_split, pat2img):
@@ -108,13 +128,15 @@ def create_splits(opt):
         raise FileNotFoundError(f"Splits file {pnas_splits_file} not found.")
 
     cv_splits = {}
-    model = None
-    if getattr(opt, 'use_vgg_features', 0):
-        model = define_net(opt)
-        model.eval()
 
     for k in pnas_splits.columns:
         print(f"Creating Split {k}...")
+        # Histology embeddings must come from the CNN trained on the training
+        # patients of *this* fold; an untrained or shared network would give
+        # meaningless features or leak test patients.
+        model = None
+        if getattr(opt, 'use_vgg_features', 0):
+            model = load_fold_path_model(opt, k, device)
         pat_train = pnas_splits.index[pnas_splits[k] == 'Train']
         pat_test = pnas_splits.index[pnas_splits[k] == 'Test']
 
@@ -159,3 +181,8 @@ def create_splits(opt):
         pickle.dump(data_dict, f)
     print(f"Saved splits to {out_file}")
     return out_file
+
+
+if __name__ == '__main__':
+    from config import parse_args
+    create_splits(parse_args())

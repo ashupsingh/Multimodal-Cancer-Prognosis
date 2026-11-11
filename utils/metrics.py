@@ -13,7 +13,6 @@ from lifelines.statistics import logrank_test
 from sklearn.metrics import (
     average_precision_score, f1_score, roc_auc_score
 )
-from sklearn.preprocessing import LabelBinarizer
 
 
 def accuracy(output, labels):
@@ -97,48 +96,79 @@ def CI_interval_str(data, confidence=0.95):
     return f"{low:.3f}, {high:.3f}"
 
 
+def aggregate_by_patient(names, pred, *labels):
+    """
+    Collapse row-level (per-ROI) predictions to one prediction per patient.
+
+    Predictions are averaged over a patient's rows; labels (identical within
+    a patient) take the first value.
+
+    Returns:
+        (patient_ids, pred_patient, *labels_patient)
+    """
+    names = np.asarray(names)
+    pred = np.asarray(pred)
+    uniq, first_idx, inv = np.unique(
+        names, return_index=True, return_inverse=True
+    )
+    counts = np.bincount(inv).astype(float)
+    if pred.ndim == 1:
+        agg = np.bincount(inv, weights=pred) / counts
+    else:
+        agg = np.zeros((len(uniq), pred.shape[1]))
+        np.add.at(agg, inv, pred)
+        agg = agg / counts[:, None]
+    out_labels = [np.asarray(lab)[first_idx] for lab in labels]
+    return (uniq, agg, *out_labels)
+
+
+def grade_metrics(probs, targets, n_classes=3):
+    """
+    Grade classification metrics for one set of predictions.
+
+    Args:
+        probs: (N, n_classes) class probabilities
+        targets: (N,) integer labels (0 = Grade II, 1 = III, 2 = IV)
+
+    Returns:
+        dict with accuracy, auc, ap, f1_micro, f1_gradeIV
+        (auc / ap micro-averaged over one-hot labels, as in Chen et al.)
+    """
+    probs = np.asarray(probs, dtype=float)
+    targets = np.asarray(targets).astype(int)
+    classes = np.arange(n_classes)
+    onehot = (targets[:, None] == classes[None, :]).astype(int)
+    pred_cls = probs.argmax(axis=1)
+
+    out = {'accuracy': float((pred_cls == targets).mean())}
+    try:
+        out['auc'] = float(roc_auc_score(onehot, probs, average='micro'))
+        out['ap'] = float(
+            average_precision_score(onehot, probs, average='micro')
+        )
+    except ValueError:
+        out['auc'], out['ap'] = float('nan'), float('nan')
+    out['f1_micro'] = float(f1_score(targets, pred_cls, average='micro'))
+    per_class = f1_score(targets, pred_cls, average=None, labels=classes,
+                         zero_division=0)
+    out['f1_gradeIV'] = float(per_class[2]) if n_classes > 2 else float('nan')
+    return out
+
+
 def calcGradMetrics(predictions_list, avg='micro'):
     """
-    Calculate grade classification metrics across all CV folds.
-    
+    Grade metrics across CV folds.
+
     Args:
-        predictions_list: List of (grade_pred, grade_true) tuples per fold
-        avg: Averaging method for F1 score
-        
+        predictions_list: list of (probs, targets) tuples, one per fold
+
     Returns:
-        dict with 'auc', 'ap', 'f1', 'f1_gradeIV' as CI_pm strings
+        dict with mean ± CI strings and the raw per-fold lists
     """
-    auc_all, ap_all, f1_all, f1_gradeIV_all = [], [], [], []
-
-    for grade_pred, grade in predictions_list:
-        grade_pred = np.array(grade_pred)
-        grade = np.array(grade)
-
-        enc = LabelBinarizer()
-        enc.fit(grade)
-        grade_oh = enc.transform(grade)
-
-        rocauc = roc_auc_score(grade_oh, grade_pred, average=avg)
-        ap = average_precision_score(grade_oh, grade_pred, average=avg)
-        f1 = f1_score(grade_pred.argmax(axis=1), grade, average=avg)
-        f1_gradeIV = f1_score(
-            grade_pred.argmax(axis=1), grade, average=None
-        )
-        # Grade IV is index 2 (Grade II=0, III=1, IV=2)
-        f1_iv = f1_gradeIV[2] if len(f1_gradeIV) > 2 else 0.0
-
-        auc_all.append(rocauc)
-        ap_all.append(ap)
-        f1_all.append(f1)
-        f1_gradeIV_all.append(f1_iv)
-
-    return {
-        'auc': CI_pm(auc_all),
-        'ap': CI_pm(ap_all),
-        'f1': CI_pm(f1_all),
-        'f1_gradeIV': CI_pm(f1_gradeIV_all),
-        'auc_raw': auc_all,
-        'ap_raw': ap_all,
-        'f1_raw': f1_all,
-        'f1_gradeIV_raw': f1_gradeIV_all,
-    }
+    per_fold = [grade_metrics(p, t) for p, t in predictions_list]
+    out = {}
+    for key in ('auc', 'ap', 'f1_micro', 'f1_gradeIV', 'accuracy'):
+        vals = [m[key] for m in per_fold]
+        out[key] = CI_pm(vals) if len(vals) > 1 else f"{vals[0]:.4f}"
+        out[key + '_raw'] = vals
+    return out

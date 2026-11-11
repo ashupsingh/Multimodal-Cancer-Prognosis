@@ -1,0 +1,14 @@
+Model,Source,Mean C-Index,Standard Error,Formatted
+Histologic Grade,Chen et al. (2022) / Baseline,0.788,0.009,0.788 ± 0.009
+Molecular Subtype,Chen et al. (2022) / Baseline,0.796,0.01,0.796 ± 0.010
+Grade + MolType,Chen et al. (2022) / Baseline,0.84,0.009,0.840 ± 0.009
+Cox (Omic),Chen et al. (2022) / Baseline,0.81,0.009,0.810 ± 0.009
+Cox (Clinical+Omic),Chen et al. (2022) / Baseline,0.824,0.009,0.824 ± 0.009
+Histology CNN (VGG19),Chen et al. (2022) / Baseline,0.765,0.012,0.765 ± 0.012
+Histology GCN (Cell Graph),Chen et al. (2022) / Baseline,0.781,0.01,0.781 ± 0.010
+Genomic SNN (Omic),Chen et al. (2022) / Baseline,0.824,0.008,0.824 ± 0.008
+CNN x SNN (Pathomic),Chen et al. (2022) / Baseline,0.835,0.009,0.835 ± 0.009
+GCN x SNN (Graphomic),Chen et al. (2022) / Baseline,0.847,0.008,0.847 ± 0.008
+CNN x GCN x SNN (Trimodal),Chen et al. (2022) / Baseline,0.854,0.007,0.854 ± 0.007
+surv_15_rnaseq_omic_omic_surv,Current Run,0.8031701444622793,0.0,0.803 ± 0.000
+surv_15_rnaseq_pathomic_pathomic_surv,Current Run,0.8488880466876721,0.0,0.849 ± 0.000

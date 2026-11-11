@@ -15,45 +15,43 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Parameter
 
-from torch_geometric.nn import SAGEConv, SAGPooling
+from torch_geometric.nn import SAGEConv, GCNConv, GATConv, SAGPooling
 from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
 
 from utils.initialization import init_max_weights
 
 
+POOL_GNN = {'GCN': GCNConv, 'GAT': GATConv, 'SAG': SAGEConv}
+
+
 class NormalizeFeaturesV2(object):
-    """Column-normalize the first 12 handcrafted features, keep CPC features as-is."""
+    """
+    Max-normalise the 12 handcrafted node features (CPC features are kept).
 
-    def __call__(self, data):
-        if data.x.shape[1] > 12:
-            max_vals = data.x[:, :12].max(0, keepdim=True)[0]
-            max_vals[max_vals == 0] = 1  # Avoid division by zero
-            data.x[:, :12] = data.x[:, :12] / max_vals
-        else:
-            max_vals = data.x.max(0, keepdim=True)[0]
-            max_vals[max_vals == 0] = 1
-            data.x = data.x / max_vals
+    Returns a new float tensor; the input graph is not modified and no
+    device transfer is performed.
+    """
 
-        if torch.cuda.is_available():
-            data.x = data.x.type(torch.cuda.FloatTensor)
-        else:
-            data.x = data.x.type(torch.FloatTensor)
-        return data
+    def __call__(self, x):
+        x = x.float()
+        n_hand = 12 if x.shape[1] > 12 else x.shape[1]
+        max_vals = x[:, :n_hand].max(0, keepdim=True)[0]
+        max_vals = torch.where(max_vals == 0, torch.ones_like(max_vals), max_vals)
+        if n_hand == x.shape[1]:
+            return x / max_vals
+        return torch.cat([x[:, :n_hand] / max_vals, x[:, n_hand:]], dim=1)
 
 
 class NormalizeEdgesV2(object):
-    """Normalize edge attributes."""
+    """Max-normalise edge attributes (returns a new float tensor)."""
 
-    def __call__(self, data):
-        if data.edge_attr is not None:
-            if torch.cuda.is_available():
-                data.edge_attr = data.edge_attr.type(torch.cuda.FloatTensor)
-            else:
-                data.edge_attr = data.edge_attr.type(torch.FloatTensor)
-            max_vals = data.edge_attr.max(0, keepdim=True)[0]
-            max_vals[max_vals == 0] = 1
-            data.edge_attr = data.edge_attr / max_vals
-        return data
+    def __call__(self, edge_attr):
+        if edge_attr is None:
+            return None
+        edge_attr = edge_attr.float()
+        max_vals = edge_attr.max(0, keepdim=True)[0]
+        max_vals = torch.where(max_vals == 0, torch.ones_like(max_vals), max_vals)
+        return edge_attr / max_vals
 
 
 class GraphNet(nn.Module):
@@ -88,12 +86,13 @@ class GraphNet(nn.Module):
         self.act = act
 
         # Graph convolution layers
+        pool_gnn = POOL_GNN.get(GNN, GCNConv) if isinstance(GNN, str) else GNN
         self.conv1 = SAGEConv(features, nhid)
-        self.pool1 = SAGPooling(nhid, ratio=pooling_ratio, GNN=SAGEConv)
+        self.pool1 = SAGPooling(nhid, ratio=pooling_ratio, GNN=pool_gnn)
         self.conv2 = SAGEConv(nhid, nhid)
-        self.pool2 = SAGPooling(nhid, ratio=pooling_ratio, GNN=SAGEConv)
+        self.pool2 = SAGPooling(nhid, ratio=pooling_ratio, GNN=pool_gnn)
         self.conv3 = SAGEConv(nhid, nhid)
-        self.pool3 = SAGPooling(nhid, ratio=pooling_ratio, GNN=SAGEConv)
+        self.pool3 = SAGPooling(nhid, ratio=pooling_ratio, GNN=pool_gnn)
 
         # Classifier
         self.lin1 = nn.Linear(nhid * 2, nhid)
@@ -114,13 +113,11 @@ class GraphNet(nn.Module):
     def forward(self, **kwargs):
         data = kwargs['x_grph']
 
-        # Normalize features and edges
-        data = NormalizeFeaturesV2()(data)
-        data = NormalizeEdgesV2()(data)
-
-        x = data.x
+        # Normalise features and edges (out of place, on the data's device)
+        x = NormalizeFeaturesV2()(data.x)
         edge_index = data.edge_index
-        edge_attr = data.edge_attr
+        edge_attr = (NormalizeEdgesV2()(data.edge_attr)
+                     if self.use_edges else None)
         batch = data.batch
 
         # Layer 1

@@ -86,6 +86,7 @@ def run_cox_baselines(split_file='./data/TCGA_GBMLGG/splits/gbmlgg15cv_all_st_1_
     omic_cols = [c for c in all_dataset.columns if c not in metadata_cols]
 
     baseline_summary = []
+    per_fold_rows = []
 
     print("\n" + "=" * 70)
     print(" Running Cox Proportional Hazards Baselines (15 Folds)")
@@ -148,8 +149,10 @@ def run_cox_baselines(split_file='./data/TCGA_GBMLGG/splits/gbmlgg15cv_all_st_1_
                     test_df['censored'].values
                 )
                 fold_cindices.append(cin)
+                per_fold_rows.append({'Key': model_name, 'fold': fold_k,
+                                      'cindex_patient': cin})
             except Exception as e:
-                pass
+                print(f"  [Warning] fold {fold_k} failed for {model_name}: {e}")
 
         if fold_cindices:
             mean_c = np.mean(fold_cindices)
@@ -168,6 +171,8 @@ def run_cox_baselines(split_file='./data/TCGA_GBMLGG/splits/gbmlgg15cv_all_st_1_
                 'Num Folds': len(fold_cindices)
             })
 
+    pd.DataFrame(per_fold_rows).to_csv(
+        os.path.join(output_dir, 'cox_baselines_per_fold.csv'), index=False)
     df_summary = pd.DataFrame(baseline_summary)
     out_csv = os.path.join(output_dir, 'cox_baselines_summary.csv')
     df_summary.to_csv(out_csv, index=False)

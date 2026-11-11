@@ -6,5 +6,5 @@ from models.networks import (
     define_net, define_optimizer, define_scheduler, define_reg,
     define_act_layer, define_bifusion, define_trifusion,
     PathomicNet, GraphomicNet, PathgraphomicNet,
-    PathpathNet, GraphgraphNet, OmicomicNet
+    PathpathNet, GraphgraphNet, OmicomicNet, PathFeatNet
 )

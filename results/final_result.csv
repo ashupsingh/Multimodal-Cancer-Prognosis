@@ -1,0 +1,15 @@
+﻿Task,Metric,Model,This project (mean ± SE over 15 folds; per patient),Published in Chen et al. (2022)
+Survival,c-index,Histology CNN,0.792 ± 0.007,0.792
+Survival,c-index,Cell-graph GCN,0.744 ± 0.010,0.746
+Survival,c-index,Genomic SNN,0.819 ± 0.008,0.808
+Survival,c-index,CNN ⊗ SNN (pathomic),0.841 ± 0.006,0.820
+Survival,c-index,GCN ⊗ SNN (graphomic),0.815 ± 0.008,0.812
+Survival,c-index,CNN ⊗ GCN ⊗ SNN (trimodal),0.838 ± 0.007,0.826
+Survival,c-index,Late fusion (average of CNN and SNN risk),0.846 ± 0.006,—
+Survival,c-index,Cox: grade + molecular subtype,0.840 ± 0.009,0.777
+Grade,AUC,Histology CNN,0.920,0.883
+Grade,AUC,Cell-graph GCN,0.880,0.849
+Grade,AUC,Genomic SNN,0.858,0.853
+Grade,AUC,CNN ⊗ SNN,0.926,0.905
+Grade,AUC,GCN ⊗ SNN,0.912,0.897
+Grade,AUC,Trimodal,0.926,0.908

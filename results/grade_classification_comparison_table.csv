@@ -1,7 +1,8 @@
-Model,Source,AUC,Average Precision (AP),Micro F1,Grade IV F1
-Histology CNN (VGG19),Chen et al. (2022),0.838,0.792,0.724,0.748
-Histology GCN (Cell Graph),Chen et al. (2022),0.856,0.814,0.748,0.772
-Genomic SNN (Omic),Chen et al. (2022),0.884,0.851,0.791,0.815
-CNN x SNN (Pathomic),Chen et al. (2022),0.892,0.863,0.804,0.831
-GCN x SNN (Graphomic),Chen et al. (2022),0.901,0.875,0.817,0.843
-CNN x GCN x SNN (Trimodal),Chen et al. (2022),0.915,0.892,0.836,0.860
+Model,Folds,AUC per patient,AP per patient,Micro-F1 per patient,Grade IV F1 per patient,AUC per ROI,AP per ROI,Micro-F1 per ROI,Grade IV F1 per ROI,Paper AUC (reported)
+Histology CNN (VGG19-BN embeddings),15,0.920 ± 0.003,0.864 ± 0.005,0.757 ± 0.009,0.914 ± 0.005,0.920 ± 0.003,0.861 ± 0.005,0.758 ± 0.006,0.909 ± 0.003,0.883
+Histology GCN (cell graph),15,0.880 ± 0.005,0.809 ± 0.007,0.682 ± 0.010,0.851 ± 0.009,0.883 ± 0.006,0.810 ± 0.008,0.689 ± 0.008,0.852 ± 0.008,0.849
+Genomic SNN,15,0.858 ± 0.005,0.741 ± 0.008,0.655 ± 0.008,0.861 ± 0.007,0.870 ± 0.005,0.762 ± 0.009,0.672 ± 0.008,0.883 ± 0.007,0.853
+CNN ⊗ SNN (Pathomic Fusion),15,0.926 ± 0.003,0.869 ± 0.006,0.752 ± 0.008,0.922 ± 0.005,0.932 ± 0.003,0.878 ± 0.005,0.769 ± 0.006,0.931 ± 0.002,0.905
+GCN ⊗ SNN (Graphomic Fusion),15,0.912 ± 0.004,0.848 ± 0.006,0.734 ± 0.009,0.907 ± 0.005,0.921 ± 0.004,0.861 ± 0.006,0.745 ± 0.008,0.920 ± 0.005,0.897
+CNN ⊗ GCN ⊗ SNN (Trimodal Fusion),15,0.926 ± 0.004,0.869 ± 0.006,0.758 ± 0.009,0.929 ± 0.005,0.936 ± 0.003,0.884 ± 0.006,0.774 ± 0.008,0.935 ± 0.004,0.908
+Late fusion: CNN + SNN,15,0.915 ± 0.003,0.854 ± 0.005,0.721 ± 0.007,0.890 ± 0.004,—,—,—,—,
